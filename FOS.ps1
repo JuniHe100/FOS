@@ -1,591 +1,1087 @@
-﻿# ================= FOS PLAYFAB + GITHUB =================
+﻿# ============================================================
+# FOS - Free Open System
+# Version 1.1
+# Real PlayFab accounts + Page Builder + GitHub uploads
+# ============================================================
 
-$FOSPlayFabTitleId = "23EA5"
-$FOSGitHubRepo = "https://github.com/JuniHe100/FOS.git"
-$FOSGitHubRoot = $FOS
-
-function FOS-PlayFabRequest {
-    param(
-        [string]$Endpoint,
-        [hashtable]$Body
-    )
-
-    $url = "https://$FOSPlayFabTitleId.playfabapi.com$Endpoint"
-
-    try {
-        $json = $Body | ConvertTo-Json -Depth 20
-        $headers = @{}
-
-        if ($global:FOSPlayFabSessionTicket) {
-            $headers["X-Authorization"] = $global:FOSPlayFabSessionTicket
-        }
-
-        return Invoke-RestMethod -Uri $url -Method Post -Headers $headers -ContentType "application/json" -Body $json
-    }
-    catch {
-        Write-Host "PlayFab error: $($_.Exception.Message)" -ForegroundColor Red
-        return $null
-    }
-}
-
-function FOS-PlayFabRegister {
-    param([string]$Username,[string]$Password,[string]$Email)
-
-    $body = @{
-        TitleId = $FOSPlayFabTitleId
-        Username = $Username
-        Password = $Password
-        RequireBothUsernameAndEmail = $false
-    }
-
-    if ($Email) { $body.Email = $Email }
-
-    $r = FOS-PlayFabRequest "/Client/RegisterPlayFabUser" $body
-
-    if ($r -and $r.SessionTicket) {
-        $global:FOSPlayFabSessionTicket = $r.SessionTicket
-        $global:FOSPlayFabId = $r.PlayFabId
-        Write-Host "PlayFab account created." -ForegroundColor Green
-        Write-Host "PlayFab ID: $($r.PlayFabId)"
-        return $true
-    }
-
-    return $false
-}
-
-function FOS-PlayFabLogin {
-    param([string]$Username,[string]$Password)
-
-    $r = FOS-PlayFabRequest "/Client/LoginWithPlayFab" @{
-        TitleId = $FOSPlayFabTitleId
-        Username = $Username
-        Password = $Password
-    }
-
-    if ($r -and $r.SessionTicket) {
-        $global:FOSPlayFabSessionTicket = $r.SessionTicket
-        $global:FOSPlayFabId = $r.PlayFabId
-
-        Write-Host "Logged into PlayFab." -ForegroundColor Green
-        Write-Host "PlayFab ID: $($r.PlayFabId)"
-        return $true
-    }
-
-    return $false
-}
-
-function FOS-PlayFabLogout {
-    $global:FOSPlayFabSessionTicket = $null
-    $global:FOSPlayFabId = $null
-    Write-Host "PlayFab session cleared." -ForegroundColor Yellow
-}
-
-function FOS-PlayFabProfile {
-    if (!$global:FOSPlayFabSessionTicket) {
-        Write-Host "Not logged into PlayFab." -ForegroundColor Yellow
-        return
-    }
-
-    $r = FOS-PlayFabRequest "/Client/GetPlayerProfile" @{
-        ProfileConstraints = @{
-            ShowDisplayName = $true
-            ShowCreated = $true
-            ShowLastLogin = $true
-            ShowLocations = $false
-            ShowAvatarUrl = $true
-        }
-    }
-
-    if ($r -and $r.PlayerProfile) {
-        $p=$r.PlayerProfile
-        Write-Host ""
-        Write-Host "PLAYFAB PROFILE" -ForegroundColor Cyan
-        Write-Host "PlayFab ID: $($global:FOSPlayFabId)"
-        Write-Host "Display Name: $($p.DisplayName)"
-        Write-Host "Created: $($p.Created)"
-        Write-Host "Last Login: $($p.LastLogin)"
-        Write-Host ""
-    }
-}
-
-function FOS-GitUpload {
-    param(
-        [string]$FilePath,
-        [string]$DetailsPath,
-        [string]$FileId
-    )
-
-    if (!(Test-Path $FilePath)) {
-        Write-Host "File not found." -ForegroundColor Red
-        return $false
-    }
-
-    if (!(Test-Path $DetailsPath)) {
-        Write-Host "Details.txt not found." -ForegroundColor Red
-        return $false
-    }
-
-    if (!(Test-Path (Join-Path $FOS ".git"))) {
-        Write-Host "Initializing FOS Git repository..."
-        git -C $FOS init
-        git -C $FOS branch -M main
-        git -C $FOS remote add origin $FOSGitHubRepo
-    }
-
-    $dest=Join-Path $FOS "Data\Files\$FileId"
-    New-Item -ItemType Directory -Path $dest -Force | Out-Null
-
-    Copy-Item $FilePath (Join-Path $dest (Split-Path $FilePath -Leaf)) -Force
-    Copy-Item $DetailsPath (Join-Path $dest "Details.txt") -Force
-
-    $meta=@{
-        FileId=$FileId
-        FileName=(Split-Path $FilePath -Leaf)
-        Uploaded=(Get-Date).ToUniversalTime().ToString("o")
-        PlayFabId=$global:FOSPlayFabId
-    } | ConvertTo-Json
-
-    $meta | Set-Content (Join-Path $dest "upload.json") -Encoding UTF8
-
-    Write-Host "Saved locally: $FileId" -ForegroundColor Green
-    Write-Host "Pushing upload to GitHub..." -ForegroundColor Cyan
-
-    git -C $FOS add -- "Data/Files/$FileId"
-    git -C $FOS commit -m "FOS upload $FileId"
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Git commit failed." -ForegroundColor Red
-        return $false
-    }
-
-    git -C $FOS push origin main
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "GitHub push failed. Your files are still saved locally." -ForegroundColor Red
-        return $false
-    }
-
-    Write-Host "GitHub upload complete!" -ForegroundColor Green
-    Write-Host "File ID: $FileId" -ForegroundColor Green
-    return $true
-}
-
-# =========================================================
 $ErrorActionPreference = "Stop"
 
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$SettingsPath = Join-Path $Root "Data\settings.json"
-$Settings = Get-Content $SettingsPath -Raw | ConvertFrom-Json
+$TitleId = "23EA5"
+$GitHubRepo = "https://github.com/JuniHe100/FOS.git"
+$MaxFileBytes = 95MB
+$MinFileBytes = 10
 
-$CurrentUser = $null
+$script:PlayFabSessionTicket = $null
+$script:PlayFabId = $null
+$script:CurrentUser = $null
+$script:PageMode = $false
+$script:CurrentPage = $null
 
-function Save-Settings {
-    $Settings | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $SettingsPath
+$Data = Join-Path $PSScriptRoot "Data"
+$Files = Join-Path $Data "Files"
+$Pages = Join-Path $Data "Pages"
+$Plugins = Join-Path $Data "Plugins"
+$HTML = Join-Path $PSScriptRoot "HTML"
+$Music = Join-Path $PSScriptRoot "MUSIC"
+$Templates = Join-Path $PSScriptRoot "Templates"
+
+@($Data,$Files,$Pages,$Plugins,$HTML,$Music,$Templates) | ForEach-Object {
+    New-Item -ItemType Directory -Path $_ -Force | Out-Null
 }
 
-function Banner {
-    Clear-Host
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "                 FOS v1.0" -ForegroundColor Cyan
-    Write-Host "          Free Open System" -ForegroundColor DarkCyan
-    Write-Host "============================================" -ForegroundColor Cyan
-    if ($CurrentUser) {
-        Write-Host "Logged in as: $CurrentUser" -ForegroundColor Green
-    } else {
-        Write-Host "Not logged in" -ForegroundColor Yellow
-    }
-    Write-Host ""
+$ConfigPath = Join-Path $PSScriptRoot "PlayFabConfig.json"
+@{
+    TitleId = $TitleId
+    GitHubRepo = $GitHubRepo
+    Version = "1.1"
+    MaxFileBytes = $MaxFileBytes
+    MinFileBytes = $MinFileBytes
+} | ConvertTo-Json | Set-Content $ConfigPath -Encoding UTF8
+
+function Say($Text="") {
+    Write-Host $Text
 }
 
-function Help {
-    Write-Host ""
-    Write-Host "FOS COMMANDS" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "/create <Username> <Password> [Email]"
-    Write-Host "/login <Username> <Password>"
-    Write-Host "/logout"
-    Write-Host "/upload <File Path> <Details.txt Path>"
-    Write-Host "/load <File/Plugin/Profile> <Subject ID Or Name>"
-    Write-Host "/view <File/Profile> <Subject ID Or Name>"
-    Write-Host "/page <Create/Edit/Delete> <Page.zip Path>"
-    Write-Host "/template <Use> <Template>"
-    Write-Host "/chat <New/Close/Resume> ..."
-    Write-Host "/server <Create/List/Join/Leave>"
-    Write-Host "/friend <Add/Remove/List>"
-    Write-Host "/plugin <Enable/Disable/Delete> <Plugin>"
-    Write-Host "/settings"
-    Write-Host "/help"
-    Write-Host "/exit"
-    Write-Host ""
+function Fail($Text) {
+    Write-Host "[ERROR] $Text" -ForegroundColor Red
 }
 
-function Create-Account {
-    param($Args)
+function Good($Text) {
+    Write-Host "[OK] $Text" -ForegroundColor Green
+}
 
-    if ($Args.Count -lt 3) {
-        Write-Host "Usage: /create <Username> <Password> [Email]" -ForegroundColor Yellow
-        return
+function Parse-Command($Line) {
+    $matches = [regex]::Matches($Line, '(?:"([^"]*)"|''([^'']*)''|(\S+))')
+    $parts = @()
+    foreach ($m in $matches) {
+        if ($m.Groups[1].Success) { $parts += $m.Groups[1].Value }
+        elseif ($m.Groups[2].Success) { $parts += $m.Groups[2].Value }
+        else { $parts += $m.Groups[3].Value }
     }
+    return $parts
+}
 
-    $Username = $Args[1]
-    $Password = $Args[2]
-    $Email = if ($Args.Count -ge 4) { $Args[3] } else { "" }
-
-    $UserFile = Join-Path $Root "Data\Users\$Username.json"
-
-    if (Test-Path $UserFile) {
-        Write-Host "Username already exists." -ForegroundColor Red
-        return
-    }
-
-    $Salt = New-Object byte[] 16
-    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($Salt)
-
-    $PBKDF2 = New-Object Security.Cryptography.Rfc2898DeriveBytes(
-        $Password,
-        $Salt,
-        100000,
-        [Security.Cryptography.HashAlgorithmName]::SHA256
+function PlayFab-Request {
+    param(
+        [string]$Endpoint,
+        [hashtable]$Body,
+        [switch]$Authenticated
     )
 
-    $Hash = [Convert]::ToBase64String($PBKDF2.GetBytes(32))
+    $Body["TitleId"] = $TitleId
+    $uri = "https://$TitleId.playfabapi.com/Client/$Endpoint"
 
-    $User = @{
+    $headers = @{}
+    if ($Authenticated) {
+        if ([string]::IsNullOrWhiteSpace($script:PlayFabSessionTicket)) {
+            throw "You are not logged in."
+        }
+        $headers["X-Authorization"] = $script:PlayFabSessionTicket
+    }
+
+    try {
+        return Invoke-RestMethod `
+            -Uri $uri `
+            -Method Post `
+            -Headers $headers `
+            -ContentType "application/json" `
+            -Body ($Body | ConvertTo-Json -Depth 20)
+    }
+    catch {
+        $msg = $_.Exception.Message
+
+        try {
+            $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+            $raw = $reader.ReadToEnd()
+            $reader.Close()
+
+            if ($raw) {
+                $json = $raw | ConvertFrom-Json
+                if ($json.errorMessage) {
+                    $msg = $json.errorMessage
+                }
+                elseif ($json.errorDetails) {
+                    $msg = "$($json.errorMessage) $($json.errorDetails | Out-String)"
+                }
+            }
+        } catch {}
+
+        throw $msg
+    }
+}
+
+function PlayFab-Create($Username,$Password,$Email) {
+    if ($Password.Length -lt 6 -or $Password.Length -gt 100) {
+        throw "Password must be 6-100 characters."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Email)) {
+        throw "Email is required for FOS account creation."
+    }
+
+    $body = @{
         Username = $Username
-        PasswordHash = $Hash
-        Salt = [Convert]::ToBase64String($Salt)
+        Password = $Password
         Email = $Email
-        EmailVerified = ($Email -eq "")
-        Created = (Get-Date).ToUniversalTime().ToString("o")
-        Friends = @()
+        RequireBothUsernameAndEmail = $true
+        DisplayName = $Username
     }
 
-    $User | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $UserFile
+    $r = PlayFab-Request "RegisterPlayFabUser" $body
 
-    Write-Host ""
-    Write-Host "ACCOUNT CREATED!" -ForegroundColor Green
-    Write-Host "Username: $Username"
+    $script:PlayFabSessionTicket = $r.data.SessionTicket
+    $script:PlayFabId = $r.data.PlayFabId
+    $script:CurrentUser = $Username
 
-    if ($Email) {
-        Write-Host "Email verification is required before uploads."
-        Write-Host "V1 local mode: email verification is simulated."
-    }
-
-    Write-Host ""
+    Good "PlayFab account created."
+    Say "Username: $Username"
+    Say "PlayFab ID: $($script:PlayFabId)"
+    Say "Logged in automatically."
 }
 
-function Settings {
-    # FOS PlayFab command interception
-$global:FOSPlayFabSessionTicket = $null
-$global:FOSPlayFabId = $null
-while ($true) {
-        Banner
-        Write-Host "SETTINGS" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "[A] Use Beta App       [$($Settings.UseBetaApp)]"
-        Write-Host "[B] Sound Effects      [$($Settings.SoundEffects)]"
-        Write-Host "[C] Music              [$($Settings.Music)]"
-        Write-Host "[D] Console Animations [$($Settings.ConsoleAnimations)]"
-        Write-Host "[E] Compact Mode       [$($Settings.CompactMode)]"
-        Write-Host "[F] Confirm Deletes    [$($Settings.ConfirmDeletes)]"
-        Write-Host "[G] Auto Open Pages    [$($Settings.AutoOpenPages)]"
-        Write-Host "[H] Notifications      [$($Settings.Notifications)]"
-        Write-Host ""
-        Write-Host "[X] Back"
-        Write-Host ""
-
-        $Key = (Read-Host "Select").ToUpper()
-
-        switch ($Key) {
-            "A" { $Settings.UseBetaApp = -not $Settings.UseBetaApp }
-            "B" { $Settings.SoundEffects = -not $Settings.SoundEffects }
-            "C" { $Settings.Music = -not $Settings.Music }
-            "D" { $Settings.ConsoleAnimations = -not $Settings.ConsoleAnimations }
-            "E" { $Settings.CompactMode = -not $Settings.CompactMode }
-            "F" { $Settings.ConfirmDeletes = -not $Settings.ConfirmDeletes }
-            "G" { $Settings.AutoOpenPages = -not $Settings.AutoOpenPages }
-            "H" { $Settings.Notifications = -not $Settings.Notifications }
-            "X" {
-                Save-Settings
-                return
-            }
+function PlayFab-Login($Username,$Password) {
+    $body = @{
+        Username = $Username
+        Password = $Password
+        InfoRequestParameters = @{
+            GetPlayerProfile = $true
         }
+    }
 
-        Save-Settings
+    $r = PlayFab-Request "LoginWithPlayFab" $body
+
+    $script:PlayFabSessionTicket = $r.data.SessionTicket
+    $script:PlayFabId = $r.data.PlayFabId
+    $script:CurrentUser = $Username
+
+    Good "Logged in."
+    Say "Username: $Username"
+    Say "PlayFab ID: $($script:PlayFabId)"
+}
+
+function PlayFab-Logout {
+    $script:PlayFabSessionTicket = $null
+    $script:PlayFabId = $null
+    $script:CurrentUser = $null
+    Good "Logged out."
+}
+
+function Require-Login {
+    if ([string]::IsNullOrWhiteSpace($script:PlayFabSessionTicket)) {
+        throw "Log in first."
     }
 }
 
-function Upload-File {
-    param($Args)
+function PlayFab-Profile {
+    Require-Login
 
-    if (-not $CurrentUser) {
-        Write-Host "You must log in first." -ForegroundColor Red
-        return
+    $body = @{
+        PlayFabId = $script:PlayFabId
     }
 
-    if ($Args.Count -lt 3) {
-        Write-Host 'Usage: /upload "File Path" "Details.txt Path"' -ForegroundColor Yellow
-        return
-    }
+    $r = PlayFab-Request "GetPlayerProfile" $body -Authenticated
+    $p = $r.data.PlayerProfile
 
-    $FilePath = $Args[1]
-    $DetailsPath = $Args[2]
-
-    if (-not (Test-Path -LiteralPath $FilePath)) {
-        Write-Host "File not found." -ForegroundColor Red
-        return
-    }
-
-    if (-not (Test-Path -LiteralPath $DetailsPath)) {
-        Write-Host "Details.txt not found." -ForegroundColor Red
-        return
-    }
-
-    $Size = (Get-Item -LiteralPath $FilePath).Length
-
-    if ($Size -lt $Settings.MinFileBytes) {
-        Write-Host "File is smaller than 10 bytes." -ForegroundColor Red
-        return
-    }
-
-    if ($Size -gt $Settings.MaxFileBytes) {
-        Write-Host "File exceeds the 100 MB v1 limit." -ForegroundColor Red
-        return
-    }
-
-    $ID = "FOS-" + ([Guid]::NewGuid().ToString("N").Substring(0,8).ToUpper())
-    $Destination = Join-Path $Root "Data\Files\$ID"
-
-    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-
-    Copy-Item -LiteralPath $FilePath -Destination (Join-Path $Destination (Split-Path $FilePath -Leaf))
-    Copy-Item -LiteralPath $DetailsPath -Destination (Join-Path $Destination "Details.txt")
-
-    @{
-        ID = $ID
-        Owner = $CurrentUser
-        FileName = Split-Path $FilePath -Leaf
-        Size = $Size
-        Created = (Get-Date).ToUniversalTime().ToString("o")
-    } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $Destination "metadata.json")
-
-    Write-Host ""
-    Write-Host "UPLOAD COMPLETE" -ForegroundColor Green
-    Write-Host "File ID: $ID"
-    Write-Host ""
+    Say ""
+    Say "PROFILE"
+    Say "----------------------------"
+    Say "Username: $script:CurrentUser"
+    Say "PlayFab ID: $($p.PlayerId)"
+    Say "Display Name: $($p.DisplayName)"
+    Say "Created: $($p.Created)"
+    Say "Last Login: $($p.LastLogin)"
+    Say "Title ID: $($p.TitleId)"
+    Say "----------------------------"
 }
 
-function View-Item {
-    param($Args)
+function Friend-Command($Args) {
+    Require-Login
 
-    if ($Args.Count -lt 3) {
-        Write-Host "/view <File/Profile> <ID or Username>" -ForegroundColor Yellow
+    if ($Args.Count -lt 1) {
+        Say "Usage:"
+        Say "/friend add <PlayFabID>"
+        Say "/friend remove <PlayFabID>"
+        Say "/friend list"
         return
     }
 
-    $Type = $Args[1].ToLower()
-    $Subject = $Args[2]
+    switch ($Args[0].ToLower()) {
+        "add" {
+            if ($Args.Count -lt 2) { throw "Usage: /friend add <PlayFabID>" }
 
-    if ($Type -eq "file") {
-        $Dir = Join-Path $Root "Data\Files\$Subject"
+            $r = PlayFab-Request "AddFriend" @{
+                FriendPlayFabId = $Args[1]
+            } -Authenticated
 
-        if (-not (Test-Path $Dir)) {
-            Write-Host "File not found." -ForegroundColor Red
-            return
+            Good "Friend added."
         }
 
-        Write-Host ""
-        Write-Host "FILE: $Subject" -ForegroundColor Cyan
+        "remove" {
+            if ($Args.Count -lt 2) { throw "Usage: /friend remove <PlayFabID>" }
 
-        $MetaPath = Join-Path $Dir "metadata.json"
-        if (Test-Path $MetaPath) {
-            Get-Content $MetaPath
+            PlayFab-Request "RemoveFriend" @{
+                FriendPlayFabId = $Args[1]
+            } -Authenticated | Out-Null
+
+            Good "Friend removed."
         }
 
-        Write-Host ""
-        Write-Host "DETAILS:" -ForegroundColor Cyan
-        Get-Content (Join-Path $Dir "Details.txt")
-    }
-    elseif ($Type -eq "profile") {
-        $UserPath = Join-Path $Root "Data\Users\$Subject.json"
+        "list" {
+            $r = PlayFab-Request "GetFriendsList" @{
+                IncludeSteamFriends = $false
+            } -Authenticated
 
-        if (-not (Test-Path $UserPath)) {
-            Write-Host "Profile not found." -ForegroundColor Red
-            return
-        }
+            Say ""
+            Say "FRIENDS"
+            Say "----------------------------"
 
-        $User = Get-Content $UserPath -Raw | ConvertFrom-Json
-
-        Write-Host ""
-        Write-Host "PROFILE" -ForegroundColor Cyan
-        Write-Host "Username: $($User.Username)"
-        Write-Host "Created: $($User.Created)"
-        Write-Host "Email verified: $($User.EmailVerified)"
-    }
-}
-
-function Template {
-    param($Args)
-
-    if ($Args.Count -lt 3) {
-        Write-Host "/template Use Page" -ForegroundColor Yellow
-        return
-    }
-
-    if ($Args[1].ToLower() -eq "use" -and $Args[2].ToLower() -eq "page") {
-        $Target = Join-Path $Root "MyPage"
-
-        New-Item -ItemType Directory -Force -Path "$Target\HTML","$Target\MUSIC","$Target\PFP" | Out-Null
-
-        Copy-Item (Join-Path $Root "Templates\Page.html") "$Target\HTML\index.html"
-
-        @{
-            Type = "Page"
-            Version = "1.0"
-        } | ConvertTo-Json | Set-Content -Encoding UTF8 "$Target\page.json"
-
-        Write-Host "Page template created at:"
-        Write-Host $Target -ForegroundColor Green
-    }
-}
-
-function Plugin {
-    param($Args)
-
-    if ($Args.Count -lt 3) {
-        Write-Host "/plugin <Enable/Disable/Delete> <Plugin>" -ForegroundColor Yellow
-        return
-    }
-
-    $Action = $Args[1].ToLower()
-    $Plugin = $Args[2]
-
-    $PluginFile = Join-Path $Root "Data\Plugins\$Plugin.json"
-
-    switch ($Action) {
-        "enable" {
-            @{
-                Name = $Plugin
-                Enabled = $true
-            } | ConvertTo-Json | Set-Content -Encoding UTF8 $PluginFile
-            Write-Host "Plugin enabled." -ForegroundColor Green
-        }
-        "disable" {
-            @{
-                Name = $Plugin
-                Enabled = $false
-            } | ConvertTo-Json | Set-Content -Encoding UTF8 $PluginFile
-            Write-Host "Plugin disabled." -ForegroundColor Yellow
-        }
-        "delete" {
-            if (Test-Path $PluginFile) {
-                Remove-Item $PluginFile -Force
-                Write-Host "Plugin deleted." -ForegroundColor Green
-            } else {
-                Write-Host "Plugin not found." -ForegroundColor Red
+            if (-not $r.data.Friends -or $r.data.Friends.Count -eq 0) {
+                Say "No friends found."
             }
-        }
-    }
-}
-
-Banner
-Write-Host "Type /help for commands."
-Write-Host ""
-
-# FOS PlayFab command interception
-$global:FOSPlayFabSessionTicket = $null
-$global:FOSPlayFabId = $null
-while ($true) {
-    $InputLine = Read-Host "FOS:/"
-
-    if ([string]::IsNullOrWhiteSpace($InputLine)) {
-        continue
-    }
-
-    $Parts = $InputLine -split '\s+'
-
-    switch ($Parts[0].ToLower()) {
-        "/help" { Help }
-        "/create" { Create-Account $Parts }
-        "/settings" { Settings }
-        "/upload" { Upload-File $Parts }
-        "/view" { View-Item $Parts }
-        "/template" { Template $Parts }
-
-        "/login" {
-            if ($Parts.Count -lt 3) {
-                Write-Host "/login <Username> <Password>"
-                continue
+            else {
+                foreach ($f in $r.data.Friends) {
+                    Say "$($f.TitleDisplayName) [$($f.FriendPlayFabId)]"
+                }
             }
 
-            $UserPath = Join-Path $Root "Data\Users\$($Parts[1]).json"
-
-            if (-not (Test-Path $UserPath)) {
-                Write-Host "Account not found." -ForegroundColor Red
-                continue
-            }
-
-            $User = Get-Content $UserPath -Raw | ConvertFrom-Json
-
-            $PBKDF2 = New-Object Security.Cryptography.Rfc2898DeriveBytes(
-                $Parts[2],
-                [Convert]::FromBase64String($User.Salt),
-                100000,
-                [Security.Cryptography.HashAlgorithmName]::SHA256
-            )
-
-            $Hash = [Convert]::ToBase64String($PBKDF2.GetBytes(32))
-
-            if ($Hash -eq $User.PasswordHash) {
-                $CurrentUser = $User.Username
-                Write-Host "Logged in successfully." -ForegroundColor Green
-            } else {
-                Write-Host "Incorrect password." -ForegroundColor Red
-            }
-        }
-
-        "/logout" {
-            $CurrentUser = $null
-            Write-Host "Logged out."
-        }
-
-        "/plugin" { Plugin $Parts }
-
-        "/page" {
-            Write-Host "Page system initialized."
-            Write-Host "Use /template Use Page to create a starter page."
-        }
-
-        "/chat" {
-            Write-Host "Chat system initialized."
-            Write-Host "Chat database folder: Data\Chats"
-        }
-
-        "/server" {
-            Write-Host "Server system initialized."
-            Write-Host "Server database folder: Data\Servers"
-        }
-
-        "/friend" {
-            Write-Host "Friend system initialized."
-        }
-
-        "/load" {
-            if ($Parts.Count -lt 3) {
-                Write-Host "/load <File/Plugin/Profile> <Subject ID Or Name>"
-            } else {
-                Write-Host "Loading $($Parts[1]) $($Parts[2])..."
-            }
-        }
-
-        "/exit" {
-            Write-Host "Goodbye."
-            break
+            Say "----------------------------"
         }
 
         default {
-            Write-Host "Unknown command. Type /help."
+            throw "Unknown friend command."
         }
     }
 }
 
+function New-Page {
+    Require-Login
+
+    $name = Read-Host "Page name"
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        throw "Page name cannot be empty."
+    }
+
+    $safe = $name -replace '[^\w\-]','_'
+    $pageDir = Join-Path $Pages $safe
+
+    New-Item -ItemType Directory -Path $pageDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $pageDir "PFP") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $pageDir "MUSIC") -Force | Out-Null
+
+    $obj = [ordered]@{
+        OwnerUsername = $script:CurrentUser
+        OwnerPlayFabId = $script:PlayFabId
+        Name = $safe
+        DisplayName = $script:CurrentUser
+        Title = "$script:CurrentUser's Page"
+        Bio = ""
+        Theme = "dark"
+        PFP = ""
+        Music = @{
+            Name = "Hey Two!"
+            Artist = "Anthony Kos"
+            Source = "default"
+        }
+        Socials = @{}
+        Created = (Get-Date).ToUniversalTime().ToString("o")
+        Published = $false
+    }
+
+    $obj | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $pageDir "page.json") -Encoding UTF8
+
+    $script:CurrentPage = $safe
+    $script:PageMode = $true
+
+    Good "Page started."
+    Say ""
+    Say "PAGE BUILDER"
+    Say "============================"
+    Say "Step 1/8 - Page name"
+    Say "Next command:"
+    Say "  /page set name <name>"
+    Say ""
+}
+
+function Get-CurrentPageObject {
+    if ([string]::IsNullOrWhiteSpace($script:CurrentPage)) {
+        throw "No page is currently selected."
+    }
+
+    $path = Join-Path $Pages "$($script:CurrentPage)\page.json"
+
+    if (-not (Test-Path $path)) {
+        throw "Page data not found."
+    }
+
+    return (Get-Content $path -Raw | ConvertFrom-Json)
+}
+
+function Save-PageObject($Obj) {
+    $path = Join-Path $Pages "$($script:CurrentPage)\page.json"
+    $Obj | ConvertTo-Json -Depth 20 | Set-Content $path -Encoding UTF8
+}
+
+function Page-Set($Args) {
+    Require-Login
+
+    if ($Args.Count -lt 2) {
+        Say "/page set name <name>"
+        Say "/page set title <title>"
+        Say "/page set bio <text>"
+        Say "/page set pfp <file>"
+        Say "/page set music <file>"
+        Say "/page set theme <theme>"
+        Say "/page set social <platform> <url>"
+        return
+    }
+
+    if (-not $script:CurrentPage) {
+        throw "Start a page first with /page start."
+    }
+
+    $field = $Args[0].ToLower()
+    $value = ($Args[1..($Args.Count-1)] -join " ")
+
+    $p = Get-CurrentPageObject
+
+    switch ($field) {
+        "name" {
+            $p.DisplayName = $value
+            Good "Page display name saved."
+            Say "Next: /page set title <title>"
+        }
+
+        "title" {
+            $p.Title = $value
+            Good "Page title saved."
+            Say "Next: /page set bio <text>"
+        }
+
+        "bio" {
+            $p.Bio = $value
+            Good "Bio saved."
+            Say "Next: /page set pfp <file>"
+        }
+
+        "pfp" {
+            $file = ($Args[1..($Args.Count-1)] -join " ")
+
+            if (-not (Test-Path $file)) {
+                throw "PFP file not found."
+            }
+
+            $dest = Join-Path $Pages "$script:CurrentPage\PFP\$([IO.Path]::GetFileName($file))"
+            Copy-Item $file $dest -Force
+            $p.PFP = "PFP/$([IO.Path]::GetFileName($file))"
+
+            Good "Profile picture saved."
+            Say "Next: /page set music <file> OR /page set music default"
+        }
+
+        "music" {
+            if ($value.ToLower() -eq "default") {
+                $p.Music = @{
+                    Name = "Hey Two!"
+                    Artist = "Anthony Kos"
+                    Source = "default"
+                }
+
+                Good "Music set to Hey Two! - Anthony Kos."
+            }
+            else {
+                if (-not (Test-Path $value)) {
+                    throw "Music file not found."
+                }
+
+                $dest = Join-Path $Pages "$script:CurrentPage\MUSIC\$([IO.Path]::GetFileName($value))"
+                Copy-Item $value $dest -Force
+
+                $p.Music = @{
+                    Name = [IO.Path]::GetFileNameWithoutExtension($value)
+                    Artist = ""
+                    Source = "MUSIC/$([IO.Path]::GetFileName($value))"
+                }
+
+                Good "Music saved."
+            }
+
+            Say "Next: /page set theme <theme>"
+        }
+
+        "theme" {
+            $allowed = @("dark","light","neon","glass","classic")
+
+            if ($allowed -notcontains $value.ToLower()) {
+                throw "Themes: dark, light, neon, glass, classic"
+            }
+
+            $p.Theme = $value.ToLower()
+            Good "Theme saved."
+            Say "Next: /page set social <platform> <url>"
+        }
+
+        "social" {
+            if ($Args.Count -lt 3) {
+                throw "Usage: /page set social <platform> <url>"
+            }
+
+            $platform = $Args[1]
+            $url = $Args[2]
+
+            if ($url -notmatch '^https?://') {
+                throw "Social URL must start with http:// or https://"
+            }
+
+            if (-not $p.Socials) {
+                $p.Socials = @{}
+            }
+
+            $p.Socials | Add-Member -NotePropertyName $platform -NotePropertyValue $url -Force
+
+            Good "$platform link saved."
+            Say "Add more socials with:"
+            Say "  /page set social <platform> <url>"
+            Say "When done:"
+            Say "  /page finish"
+        }
+
+        default {
+            throw "Unknown page field."
+        }
+    }
+
+    Save-PageObject $p
+}
+
+function Page-Finish {
+    Require-Login
+
+    $p = Get-CurrentPageObject
+
+    $missing = @()
+
+    if ([string]::IsNullOrWhiteSpace($p.DisplayName)) { $missing += "display name" }
+    if ([string]::IsNullOrWhiteSpace($p.Title)) { $missing += "title" }
+    if ([string]::IsNullOrWhiteSpace($p.Theme)) { $missing += "theme" }
+
+    if ($missing.Count -gt 0) {
+        Fail "Page is not ready."
+        Say "Missing: $($missing -join ', ')"
+        return
+    }
+
+    $socialHtml = ""
+
+    if ($p.Socials) {
+        foreach ($prop in $p.Socials.PSObject.Properties) {
+            $platform = [System.Net.WebUtility]::HtmlEncode([string]$prop.Name)
+            $url = [System.Net.WebUtility]::HtmlEncode([string]$prop.Value)
+
+            $socialHtml += "<a class='social' href='$url' target='_blank'>$platform</a>`n"
+        }
+    }
+
+    $bio = [System.Net.WebUtility]::HtmlEncode([string]$p.Bio)
+    $title = [System.Net.WebUtility]::HtmlEncode([string]$p.Title)
+    $display = [System.Net.WebUtility]::HtmlEncode([string]$p.DisplayName)
+    $theme = [System.Net.WebUtility]::HtmlEncode([string]$p.Theme)
+
+    $musicName = [System.Net.WebUtility]::HtmlEncode([string]$p.Music.Name)
+    $musicArtist = [System.Net.WebUtility]::HtmlEncode([string]$p.Music.Artist)
+
+    $html = @"
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>$title</title>
+<style>
+body{margin:0;font-family:Arial,sans-serif;background:#111;color:white;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{width:min(700px,90%);padding:40px;border-radius:25px;background:#1b1b1b;text-align:center;box-shadow:0 20px 60px #000}
+h1{font-size:42px;margin:10px}
+.bio{opacity:.8;font-size:18px;margin:20px}
+.social{display:inline-block;margin:6px;padding:10px 16px;border-radius:12px;background:#333;color:white;text-decoration:none}
+.music{margin-top:25px;padding:15px;border-radius:15px;background:#252525}
+.theme{font-size:12px;opacity:.5}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="theme">$theme</div>
+<h1>$display</h1>
+<h2>$title</h2>
+<div class="bio">$bio</div>
+<div>$socialHtml</div>
+<div class="music">
+Music: <b>$musicName</b><br>
+Artist: $musicArtist
+</div>
+</div>
+</body>
+</html>
+"@
+
+    $pagePath = Join-Path $Pages $script:CurrentPage
+    $html | Set-Content (Join-Path $pagePath "index.html") -Encoding UTF8
+
+    $p.Published = $false
+    Save-PageObject $p
+
+    Good "PAGE COMPLETE!"
+    Say "index.html generated."
+    Say "page.json saved."
+    Say ""
+    Say "Open:     /page open"
+    Say "Publish:  /page publish"
+
+    $script:PageMode = $false
+}
+
+function Page-Open {
+    if (-not $script:CurrentPage) {
+        $pages = Get-ChildItem $Pages -Directory
+        if ($pages.Count -eq 0) {
+            throw "No pages exist."
+        }
+
+        Say "Pages:"
+        foreach ($x in $pages) { Say " - $($x.Name)" }
+
+        $pick = Read-Host "Page name"
+        $script:CurrentPage = $pick
+    }
+
+    $file = Join-Path $Pages "$script:CurrentPage\index.html"
+
+    if (-not (Test-Path $file)) {
+        throw "Finish the page first with /page finish."
+    }
+
+    Start-Process $file
+    Good "Page opened."
+}
+
+function Page-List {
+    $pages = Get-ChildItem $Pages -Directory
+
+    if ($pages.Count -eq 0) {
+        Say "No pages."
+        return
+    }
+
+    Say ""
+    Say "PAGES"
+    Say "----------------------------"
+
+    foreach ($dir in $pages) {
+        $json = Join-Path $dir.FullName "page.json"
+
+        if (Test-Path $json) {
+            $p = Get-Content $json -Raw | ConvertFrom-Json
+            Say "$($dir.Name) - $($p.DisplayName)"
+        }
+        else {
+            Say $dir.Name
+        }
+    }
+}
+
+function Page-Delete {
+    Require-Login
+
+    $name = if ($Args.Count -gt 0) { $Args[0] } else { Read-Host "Page name" }
+    $dir = Join-Path $Pages $name
+
+    if (-not (Test-Path $dir)) {
+        throw "Page not found."
+    }
+
+    Remove-Item $dir -Recurse -Force
+    Good "Page deleted."
+}
+
+function Page-Publish {
+    Require-Login
+
+    if (-not $script:CurrentPage) {
+        throw "Select/start a page first."
+    }
+
+    $p = Get-CurrentPageObject
+    $p.Published = $true
+    Save-PageObject $p
+
+    Good "Page marked as published."
+    Say "The page files are ready in:"
+    Say "  Data\Pages\$script:CurrentPage"
+}
+
+function Page-Unpublish {
+    Require-Login
+
+    if (-not $script:CurrentPage) {
+        throw "Select a page first."
+    }
+
+    $p = Get-CurrentPageObject
+    $p.Published = $false
+    Save-PageObject $p
+
+    Good "Page unpublished."
+}
+
+function Page-Edit {
+    Require-Login
+
+    if (-not $script:CurrentPage) {
+        $pages = Get-ChildItem $Pages -Directory
+
+        if ($pages.Count -eq 0) {
+            throw "No pages exist."
+        }
+
+        Say "Available pages:"
+        foreach ($x in $pages) { Say " - $($x.Name)" }
+
+        $script:CurrentPage = Read-Host "Page name"
+    }
+
+    $script:PageMode = $true
+
+    Say ""
+    Say "PAGE EDITOR"
+    Say "Page:/>"
+    Say ""
+    Say "/page set name <name>"
+    Say "/page set title <title>"
+    Say "/page set bio <text>"
+    Say "/page set pfp <file>"
+    Say "/page set music <file|default>"
+    Say "/page set theme <theme>"
+    Say "/page set social <platform> <url>"
+    Say "/page finish"
+}
+
+function Upload-File($Path,$DetailsPath) {
+    Require-Login
+
+    if (-not (Test-Path $Path -PathType Leaf)) {
+        throw "File not found."
+    }
+
+    if (-not (Test-Path $DetailsPath -PathType Leaf)) {
+        throw "Details.txt not found."
+    }
+
+    $item = Get-Item $Path
+
+    if ($item.Length -lt $MinFileBytes) {
+        throw "File is smaller than $MinFileBytes bytes."
+    }
+
+    if ($item.Length -gt $MaxFileBytes) {
+        throw "File is larger than 95 MB."
+    }
+
+    $id = "FOS-" + ([guid]::NewGuid().ToString("N").Substring(0,8).ToUpper())
+    $dir = Join-Path $Files $id
+
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+
+    Copy-Item $Path (Join-Path $dir $item.Name) -Force
+    Copy-Item $DetailsPath (Join-Path $dir "Details.txt") -Force
+
+    @{
+        ID = $id
+        OwnerUsername = $script:CurrentUser
+        OwnerPlayFabId = $script:PlayFabId
+        FileName = $item.Name
+        Size = $item.Length
+        Created = (Get-Date).ToUniversalTime().ToString("o")
+    } | ConvertTo-Json | Set-Content (Join-Path $dir "metadata.json") -Encoding UTF8
+
+    Good "Upload prepared."
+    Say "ID: $id"
+
+    Push-Git "upload $id"
+}
+
+function Push-Git($Message="FOS update") {
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "Git is not installed."
+    }
+
+    git rev-parse --is-inside-work-tree *> $null
+
+    if ($LASTEXITCODE -ne 0) {
+        git init | Out-Null
+    }
+
+    $remote = git remote get-url origin 2>$null
+
+    if (-not $remote) {
+        git remote add origin $GitHubRepo
+    }
+    elseif ($remote -ne $GitHubRepo) {
+        git remote set-url origin $GitHubRepo
+    }
+
+    git add --all
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "git add failed."
+    }
+
+    git diff --cached --quiet
+
+    if ($LASTEXITCODE -eq 0) {
+        Say "Nothing new to commit."
+        return
+    }
+
+    git commit -m "FOS: $Message"
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "git commit failed."
+    }
+
+    git branch -M main
+    git push -u origin main
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "git push failed. GitHub authentication may be required."
+    }
+
+    Good "GitHub push complete."
+}
+
+function Show-Help {
+    Say ""
+    Say "FOS COMMANDS"
+    Say "================================================"
+    Say "/create <username> <password> <email>"
+    Say "/login <username> <password>"
+    Say "/logout"
+    Say "/whoami"
+    Say "/profile"
+    Say "/friend add <PlayFabID>"
+    Say "/friend remove <PlayFabID>"
+    Say "/friend list"
+    Say ""
+    Say "/upload <file> <Details.txt>"
+    Say "/page start"
+    Say "/page edit"
+    Say "/page open"
+    Say "/page list"
+    Say "/page delete <name>"
+    Say "/page publish"
+    Say "/page unpublish"
+    Say "/page set name <name>"
+    Say "/page set title <title>"
+    Say "/page set bio <text>"
+    Say "/page set pfp <file>"
+    Say "/page set music <file|default>"
+    Say "/page set theme <dark|light|neon|glass|classic>"
+    Say "/page set social <platform> <url>"
+    Say "/page finish"
+    Say ""
+    Say "/git status"
+    Say "/git push"
+    Say "/template"
+    Say "/plugin list"
+    Say "/clear"
+    Say "/version"
+    Say "/about"
+    Say "/help"
+    Say "/exit"
+    Say "================================================"
+}
+
+function Show-Banner {
+    Clear-Host
+    Say "========================================"
+    Say "             FOS v1.1"
+    Say "       Free Open System"
+    Say "========================================"
+    Say "Connected to PlayFab Title: $TitleId"
+    Say ""
+}
+
+function Show-WhoAmI {
+    if ($script:CurrentUser) {
+        Say "Username: $script:CurrentUser"
+        Say "PlayFab ID: $script:PlayFabId"
+    }
+    else {
+        Say "Not logged in."
+    }
+}
+
+Show-Banner
+
+while ($true) {
+
+    if ($script:PageMode) {
+        $prompt = "Page:/> "
+    }
+    else {
+        $prompt = "FOS:/> "
+    }
+
+    $line = Read-Host $prompt
+
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        continue
+    }
+
+    try {
+        $a = Parse-Command $line
+
+        if ($a.Count -eq 0) {
+            continue
+        }
+
+        $cmd = $a[0].ToLower()
+        $args = if ($a.Count -gt 1) { @($a[1..($a.Count-1)]) } else { @() }
+
+        if ($script:PageMode -and $cmd -eq "/page") {
+
+            if ($args.Count -eq 0) {
+                Say "/page set ... | /page finish | /page done"
+                continue
+            }
+
+            switch ($args[0].ToLower()) {
+                "set" {
+                    Page-Set $args[1..($args.Count-1)]
+                }
+
+                "finish" {
+                    Page-Finish
+                }
+
+                "done" {
+                    Page-Finish
+                }
+
+                "edit" {
+                    Page-Edit
+                }
+
+                "open" {
+                    Page-Open
+                }
+
+                default {
+                    Fail "Unknown Page command."
+                }
+            }
+
+            continue
+        }
+
+        switch ($cmd) {
+
+            "/create" {
+                if ($args.Count -lt 3) {
+                    Say "Usage: /create <username> <password> <email>"
+                    break
+                }
+
+                PlayFab-Create $args[0] $args[1] $args[2]
+            }
+
+            "/login" {
+                if ($args.Count -lt 2) {
+                    Say "Usage: /login <username> <password>"
+                    break
+                }
+
+                PlayFab-Login $args[0] $args[1]
+            }
+
+            "/logout" {
+                PlayFab-Logout
+            }
+
+            "/whoami" {
+                Show-WhoAmI
+            }
+
+            "/profile" {
+                PlayFab-Profile
+            }
+
+            "/view" {
+                if ($args.Count -ge 2 -and $args[0].ToLower() -eq "profile" -and $args[1].ToLower() -eq "me") {
+                    PlayFab-Profile
+                }
+                else {
+                    Say "Usage: /view Profile me"
+                }
+            }
+
+            "/friend" {
+                Friend-Command $args
+            }
+
+            "/upload" {
+                if ($args.Count -lt 2) {
+                    Say "Usage: /upload <file> <Details.txt>"
+                    break
+                }
+
+                Upload-File $args[0] $args[1]
+            }
+
+            "/page" {
+                if ($args.Count -eq 0) {
+                    Say "/page start"
+                    Say "/page edit"
+                    Say "/page open"
+                    Say "/page list"
+                    Say "/page delete <name>"
+                    Say "/page publish"
+                    Say "/page unpublish"
+                    break
+                }
+
+                switch ($args[0].ToLower()) {
+                    "start" {
+                        New-Page
+                    }
+
+                    "edit" {
+                        Page-Edit
+                    }
+
+                    "open" {
+                        Page-Open
+                    }
+
+                    "list" {
+                        Page-List
+                    }
+
+                    "delete" {
+                        Page-Delete
+                    }
+
+                    "publish" {
+                        Page-Publish
+                    }
+
+                    "unpublish" {
+                        Page-Unpublish
+                    }
+
+                    "set" {
+                        Page-Set $args[1..($args.Count-1)]
+                    }
+
+                    "finish" {
+                        Page-Finish
+                    }
+
+                    "done" {
+                        Page-Finish
+                    }
+
+                    default {
+                        Fail "Unknown page command."
+                    }
+                }
+            }
+
+            "/git" {
+                if ($args.Count -eq 0) {
+                    Say "/git status"
+                    Say "/git push"
+                    break
+                }
+
+                switch ($args[0].ToLower()) {
+                    "status" {
+                        git status
+                    }
+
+                    "push" {
+                        Push-Git "manual push"
+                    }
+
+                    default {
+                        Say "/git status"
+                        Say "/git push"
+                    }
+                }
+            }
+
+            "/template" {
+                $template = Join-Path $Templates "Page.html"
+
+                @"
+<!DOCTYPE html>
+<html>
+<head>
+<title>My FOS Page</title>
+</head>
+<body>
+<h1>My FOS Page</h1>
+<p>Made with FOS.</p>
+</body>
+</html>
+"@ | Set-Content $template -Encoding UTF8
+
+                Good "Page template created:"
+                Say $template
+            }
+
+            "/plugin" {
+                if ($args.Count -eq 0 -or $args[0].ToLower() -eq "list") {
+                    $items = Get-ChildItem $Plugins -File -ErrorAction SilentlyContinue
+                    if (-not $items) {
+                        Say "No plugins installed."
+                    }
+                    else {
+                        foreach ($x in $items) {
+                            Say $x.Name
+                        }
+                    }
+                }
+                else {
+                    Say "Plugin command available for local FOS plugins."
+                }
+            }
+
+            "/clear" {
+                Clear-Host
+            }
+
+            "/version" {
+                Say "FOS v1.1"
+            }
+
+            "/about" {
+                Say "FOS - Free Open System"
+                Say "PlayFab Title: $TitleId"
+                Say "GitHub: $GitHubRepo"
+            }
+
+            "/help" {
+                Show-Help
+            }
+
+            "/exit" {
+                break
+            }
+
+            default {
+                Fail "Unknown command. Type /help."
+            }
+        }
+    }
+    catch {
+        Fail $_.Exception.Message
+    }
+}

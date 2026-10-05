@@ -1,0 +1,5 @@
+﻿Data/Users/
+*.session
+*.password
+*.secret
+*.before-*.bak

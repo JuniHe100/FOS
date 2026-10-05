@@ -1,13 +1,13 @@
 ﻿{
-  "Version": "1.0",
-  "MaxFileBytes": 104857600,
-  "MinFileBytes": 10,
-  "UseBetaApp": false,
-  "SoundEffects": true,
-  "Music": true,
-  "ConsoleAnimations": true,
-  "ConfirmDeletes": true,
-  "AutoOpenPages": true,
-  "Notifications": true,
-  "CompactMode": false
+    "Version":  "1.0",
+    "MaxFileBytes":  104857600,
+    "MinFileBytes":  10,
+    "UseBetaApp":  false,
+    "SoundEffects":  true,
+    "Music":  true,
+    "ConsoleAnimations":  true,
+    "ConfirmDeletes":  true,
+    "AutoOpenPages":  true,
+    "Notifications":  true,
+    "CompactMode":  false
 }
