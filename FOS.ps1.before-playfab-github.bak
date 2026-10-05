@@ -1,0 +1,411 @@
+﻿$ErrorActionPreference = "Stop"
+
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$SettingsPath = Join-Path $Root "Data\settings.json"
+$Settings = Get-Content $SettingsPath -Raw | ConvertFrom-Json
+
+$CurrentUser = $null
+
+function Save-Settings {
+    $Settings | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $SettingsPath
+}
+
+function Banner {
+    Clear-Host
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "                 FOS v1.0" -ForegroundColor Cyan
+    Write-Host "          Free Open System" -ForegroundColor DarkCyan
+    Write-Host "============================================" -ForegroundColor Cyan
+    if ($CurrentUser) {
+        Write-Host "Logged in as: $CurrentUser" -ForegroundColor Green
+    } else {
+        Write-Host "Not logged in" -ForegroundColor Yellow
+    }
+    Write-Host ""
+}
+
+function Help {
+    Write-Host ""
+    Write-Host "FOS COMMANDS" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "/create <Username> <Password> [Email]"
+    Write-Host "/login <Username> <Password>"
+    Write-Host "/logout"
+    Write-Host "/upload <File Path> <Details.txt Path>"
+    Write-Host "/load <File/Plugin/Profile> <Subject ID Or Name>"
+    Write-Host "/view <File/Profile> <Subject ID Or Name>"
+    Write-Host "/page <Create/Edit/Delete> <Page.zip Path>"
+    Write-Host "/template <Use> <Template>"
+    Write-Host "/chat <New/Close/Resume> ..."
+    Write-Host "/server <Create/List/Join/Leave>"
+    Write-Host "/friend <Add/Remove/List>"
+    Write-Host "/plugin <Enable/Disable/Delete> <Plugin>"
+    Write-Host "/settings"
+    Write-Host "/help"
+    Write-Host "/exit"
+    Write-Host ""
+}
+
+function Create-Account {
+    param($Args)
+
+    if ($Args.Count -lt 3) {
+        Write-Host "Usage: /create <Username> <Password> [Email]" -ForegroundColor Yellow
+        return
+    }
+
+    $Username = $Args[1]
+    $Password = $Args[2]
+    $Email = if ($Args.Count -ge 4) { $Args[3] } else { "" }
+
+    $UserFile = Join-Path $Root "Data\Users\$Username.json"
+
+    if (Test-Path $UserFile) {
+        Write-Host "Username already exists." -ForegroundColor Red
+        return
+    }
+
+    $Salt = New-Object byte[] 16
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($Salt)
+
+    $PBKDF2 = New-Object Security.Cryptography.Rfc2898DeriveBytes(
+        $Password,
+        $Salt,
+        100000,
+        [Security.Cryptography.HashAlgorithmName]::SHA256
+    )
+
+    $Hash = [Convert]::ToBase64String($PBKDF2.GetBytes(32))
+
+    $User = @{
+        Username = $Username
+        PasswordHash = $Hash
+        Salt = [Convert]::ToBase64String($Salt)
+        Email = $Email
+        EmailVerified = ($Email -eq "")
+        Created = (Get-Date).ToUniversalTime().ToString("o")
+        Friends = @()
+    }
+
+    $User | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $UserFile
+
+    Write-Host ""
+    Write-Host "ACCOUNT CREATED!" -ForegroundColor Green
+    Write-Host "Username: $Username"
+
+    if ($Email) {
+        Write-Host "Email verification is required before uploads."
+        Write-Host "V1 local mode: email verification is simulated."
+    }
+
+    Write-Host ""
+}
+
+function Settings {
+    while ($true) {
+        Banner
+        Write-Host "SETTINGS" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "[A] Use Beta App       [$($Settings.UseBetaApp)]"
+        Write-Host "[B] Sound Effects      [$($Settings.SoundEffects)]"
+        Write-Host "[C] Music              [$($Settings.Music)]"
+        Write-Host "[D] Console Animations [$($Settings.ConsoleAnimations)]"
+        Write-Host "[E] Compact Mode       [$($Settings.CompactMode)]"
+        Write-Host "[F] Confirm Deletes    [$($Settings.ConfirmDeletes)]"
+        Write-Host "[G] Auto Open Pages    [$($Settings.AutoOpenPages)]"
+        Write-Host "[H] Notifications      [$($Settings.Notifications)]"
+        Write-Host ""
+        Write-Host "[X] Back"
+        Write-Host ""
+
+        $Key = (Read-Host "Select").ToUpper()
+
+        switch ($Key) {
+            "A" { $Settings.UseBetaApp = -not $Settings.UseBetaApp }
+            "B" { $Settings.SoundEffects = -not $Settings.SoundEffects }
+            "C" { $Settings.Music = -not $Settings.Music }
+            "D" { $Settings.ConsoleAnimations = -not $Settings.ConsoleAnimations }
+            "E" { $Settings.CompactMode = -not $Settings.CompactMode }
+            "F" { $Settings.ConfirmDeletes = -not $Settings.ConfirmDeletes }
+            "G" { $Settings.AutoOpenPages = -not $Settings.AutoOpenPages }
+            "H" { $Settings.Notifications = -not $Settings.Notifications }
+            "X" {
+                Save-Settings
+                return
+            }
+        }
+
+        Save-Settings
+    }
+}
+
+function Upload-File {
+    param($Args)
+
+    if (-not $CurrentUser) {
+        Write-Host "You must log in first." -ForegroundColor Red
+        return
+    }
+
+    if ($Args.Count -lt 3) {
+        Write-Host 'Usage: /upload "File Path" "Details.txt Path"' -ForegroundColor Yellow
+        return
+    }
+
+    $FilePath = $Args[1]
+    $DetailsPath = $Args[2]
+
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        Write-Host "File not found." -ForegroundColor Red
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $DetailsPath)) {
+        Write-Host "Details.txt not found." -ForegroundColor Red
+        return
+    }
+
+    $Size = (Get-Item -LiteralPath $FilePath).Length
+
+    if ($Size -lt $Settings.MinFileBytes) {
+        Write-Host "File is smaller than 10 bytes." -ForegroundColor Red
+        return
+    }
+
+    if ($Size -gt $Settings.MaxFileBytes) {
+        Write-Host "File exceeds the 100 MB v1 limit." -ForegroundColor Red
+        return
+    }
+
+    $ID = "FOS-" + ([Guid]::NewGuid().ToString("N").Substring(0,8).ToUpper())
+    $Destination = Join-Path $Root "Data\Files\$ID"
+
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+
+    Copy-Item -LiteralPath $FilePath -Destination (Join-Path $Destination (Split-Path $FilePath -Leaf))
+    Copy-Item -LiteralPath $DetailsPath -Destination (Join-Path $Destination "Details.txt")
+
+    @{
+        ID = $ID
+        Owner = $CurrentUser
+        FileName = Split-Path $FilePath -Leaf
+        Size = $Size
+        Created = (Get-Date).ToUniversalTime().ToString("o")
+    } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $Destination "metadata.json")
+
+    Write-Host ""
+    Write-Host "UPLOAD COMPLETE" -ForegroundColor Green
+    Write-Host "File ID: $ID"
+    Write-Host ""
+}
+
+function View-Item {
+    param($Args)
+
+    if ($Args.Count -lt 3) {
+        Write-Host "/view <File/Profile> <ID or Username>" -ForegroundColor Yellow
+        return
+    }
+
+    $Type = $Args[1].ToLower()
+    $Subject = $Args[2]
+
+    if ($Type -eq "file") {
+        $Dir = Join-Path $Root "Data\Files\$Subject"
+
+        if (-not (Test-Path $Dir)) {
+            Write-Host "File not found." -ForegroundColor Red
+            return
+        }
+
+        Write-Host ""
+        Write-Host "FILE: $Subject" -ForegroundColor Cyan
+
+        $MetaPath = Join-Path $Dir "metadata.json"
+        if (Test-Path $MetaPath) {
+            Get-Content $MetaPath
+        }
+
+        Write-Host ""
+        Write-Host "DETAILS:" -ForegroundColor Cyan
+        Get-Content (Join-Path $Dir "Details.txt")
+    }
+    elseif ($Type -eq "profile") {
+        $UserPath = Join-Path $Root "Data\Users\$Subject.json"
+
+        if (-not (Test-Path $UserPath)) {
+            Write-Host "Profile not found." -ForegroundColor Red
+            return
+        }
+
+        $User = Get-Content $UserPath -Raw | ConvertFrom-Json
+
+        Write-Host ""
+        Write-Host "PROFILE" -ForegroundColor Cyan
+        Write-Host "Username: $($User.Username)"
+        Write-Host "Created: $($User.Created)"
+        Write-Host "Email verified: $($User.EmailVerified)"
+    }
+}
+
+function Template {
+    param($Args)
+
+    if ($Args.Count -lt 3) {
+        Write-Host "/template Use Page" -ForegroundColor Yellow
+        return
+    }
+
+    if ($Args[1].ToLower() -eq "use" -and $Args[2].ToLower() -eq "page") {
+        $Target = Join-Path $Root "MyPage"
+
+        New-Item -ItemType Directory -Force -Path "$Target\HTML","$Target\MUSIC","$Target\PFP" | Out-Null
+
+        Copy-Item (Join-Path $Root "Templates\Page.html") "$Target\HTML\index.html"
+
+        @{
+            Type = "Page"
+            Version = "1.0"
+        } | ConvertTo-Json | Set-Content -Encoding UTF8 "$Target\page.json"
+
+        Write-Host "Page template created at:"
+        Write-Host $Target -ForegroundColor Green
+    }
+}
+
+function Plugin {
+    param($Args)
+
+    if ($Args.Count -lt 3) {
+        Write-Host "/plugin <Enable/Disable/Delete> <Plugin>" -ForegroundColor Yellow
+        return
+    }
+
+    $Action = $Args[1].ToLower()
+    $Plugin = $Args[2]
+
+    $PluginFile = Join-Path $Root "Data\Plugins\$Plugin.json"
+
+    switch ($Action) {
+        "enable" {
+            @{
+                Name = $Plugin
+                Enabled = $true
+            } | ConvertTo-Json | Set-Content -Encoding UTF8 $PluginFile
+            Write-Host "Plugin enabled." -ForegroundColor Green
+        }
+        "disable" {
+            @{
+                Name = $Plugin
+                Enabled = $false
+            } | ConvertTo-Json | Set-Content -Encoding UTF8 $PluginFile
+            Write-Host "Plugin disabled." -ForegroundColor Yellow
+        }
+        "delete" {
+            if (Test-Path $PluginFile) {
+                Remove-Item $PluginFile -Force
+                Write-Host "Plugin deleted." -ForegroundColor Green
+            } else {
+                Write-Host "Plugin not found." -ForegroundColor Red
+            }
+        }
+    }
+}
+
+Banner
+Write-Host "Type /help for commands."
+Write-Host ""
+
+while ($true) {
+    $InputLine = Read-Host "FOS:/"
+
+    if ([string]::IsNullOrWhiteSpace($InputLine)) {
+        continue
+    }
+
+    $Parts = $InputLine -split '\s+'
+
+    switch ($Parts[0].ToLower()) {
+        "/help" { Help }
+        "/create" { Create-Account $Parts }
+        "/settings" { Settings }
+        "/upload" { Upload-File $Parts }
+        "/view" { View-Item $Parts }
+        "/template" { Template $Parts }
+
+        "/login" {
+            if ($Parts.Count -lt 3) {
+                Write-Host "/login <Username> <Password>"
+                continue
+            }
+
+            $UserPath = Join-Path $Root "Data\Users\$($Parts[1]).json"
+
+            if (-not (Test-Path $UserPath)) {
+                Write-Host "Account not found." -ForegroundColor Red
+                continue
+            }
+
+            $User = Get-Content $UserPath -Raw | ConvertFrom-Json
+
+            $PBKDF2 = New-Object Security.Cryptography.Rfc2898DeriveBytes(
+                $Parts[2],
+                [Convert]::FromBase64String($User.Salt),
+                100000,
+                [Security.Cryptography.HashAlgorithmName]::SHA256
+            )
+
+            $Hash = [Convert]::ToBase64String($PBKDF2.GetBytes(32))
+
+            if ($Hash -eq $User.PasswordHash) {
+                $CurrentUser = $User.Username
+                Write-Host "Logged in successfully." -ForegroundColor Green
+            } else {
+                Write-Host "Incorrect password." -ForegroundColor Red
+            }
+        }
+
+        "/logout" {
+            $CurrentUser = $null
+            Write-Host "Logged out."
+        }
+
+        "/plugin" { Plugin $Parts }
+
+        "/page" {
+            Write-Host "Page system initialized."
+            Write-Host "Use /template Use Page to create a starter page."
+        }
+
+        "/chat" {
+            Write-Host "Chat system initialized."
+            Write-Host "Chat database folder: Data\Chats"
+        }
+
+        "/server" {
+            Write-Host "Server system initialized."
+            Write-Host "Server database folder: Data\Servers"
+        }
+
+        "/friend" {
+            Write-Host "Friend system initialized."
+        }
+
+        "/load" {
+            if ($Parts.Count -lt 3) {
+                Write-Host "/load <File/Plugin/Profile> <Subject ID Or Name>"
+            } else {
+                Write-Host "Loading $($Parts[1]) $($Parts[2])..."
+            }
+        }
+
+        "/exit" {
+            Write-Host "Goodbye."
+            break
+        }
+
+        default {
+            Write-Host "Unknown command. Type /help."
+        }
+    }
+}

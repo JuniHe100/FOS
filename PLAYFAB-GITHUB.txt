@@ -1,0 +1,27 @@
+﻿FOS PlayFab/GitHub Integration
+
+PlayFab Title ID:
+23EA5
+
+GitHub repository:
+https://github.com/JuniHe100/FOS
+
+PlayFab handles:
+- Accounts
+- Login sessions
+- PlayFab player IDs
+- Player profiles
+
+GitHub handles:
+- FOS source
+- Uploaded files
+- Details.txt files
+- File metadata
+- Project transfer
+
+IMPORTANT:
+Never put a PlayFab Secret Key or GitHub token in this repository.
+Use Git's existing authentication on the computer.
+
+The original FOS.ps1 was backed up before modification:
+FOS.ps1.before-playfab-github.bak

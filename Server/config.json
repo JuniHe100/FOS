@@ -1,0 +1,6 @@
+﻿{
+  "Version": "1.0",
+  "ServerName": "FOS Local Server",
+  "Host": "127.0.0.1",
+  "Port": 8787
+}
