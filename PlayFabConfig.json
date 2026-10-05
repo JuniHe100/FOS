@@ -1,5 +1,7 @@
 ﻿{
-  "TitleId": "23EA5",
-  "Provider": "PlayFab",
-  "Enabled": true
+    "GitHubRepo":  "https://github.com/JuniHe100/FOS.git",
+    "MinFileBytes":  10,
+    "MaxFileBytes":  99614720,
+    "TitleId":  "23EA5",
+    "Version":  "1.1"
 }

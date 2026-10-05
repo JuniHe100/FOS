@@ -58,8 +58,7 @@ function Parse-Command($Line) {
         elseif ($m.Groups[2].Success) { $parts += $m.Groups[2].Value }
         else { $parts += $m.Groups[3].Value }
     }
-    return $parts
-}
+    return ,$parts`r`n}
 
 function PlayFab-Request {
     param(
@@ -1085,3 +1084,4 @@ while ($true) {
         Fail $_.Exception.Message
     }
 }
+
